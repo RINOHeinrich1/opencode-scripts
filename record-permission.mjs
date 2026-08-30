@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
  * record-permission.mjs — Enregistre une demande de permission opencode comme
- * décision humaine (dédoublonnée par permission_id) + envoie un email.
+ * décision humaine (dédoublonnée par permission_id).
  * Appelé par le plugin `permission-hook` sur l'événement `permission.asked`.
+ *
+ * v0.1.0 : AUCUN email envoyé ici. La décision `permission` est simplement
+ * persistée dans le registre ; le daemon `opencode-notifier` observe la table
+ * `decisions` (kind=permission, status=awaiting) et notifie l'utilisateur.
  *
  * NOTE : les fonctions du registre sont ASYNCHRONES (PostgreSQL) — il faut les
  * `await`, sinon `existing`/`task` restent des Promises (toujours truthy) et la
  * décision n'est jamais enregistrée.
  */
-import { execFileSync } from "node:child_process";
-import { homedir } from "node:os";
 import { findTaskBySessionChain, requestDecision, findDecisionByPermissionId } from "/root/.config/opencode/mcp/task-orchestrator/db.mjs";
-
-const MAIL = `${homedir()}/.config/opencode/scripts/send-mail.mjs`;
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -27,23 +27,13 @@ const id = arg("id"); // permission id opencode (per_...)
 
 const detail = `${type}${pattern ? " : " + pattern : ""}`;
 
-let body = `Demande de permission détectée :\n` +
-  `- type : ${type || "—"}\n` +
-  `- pattern : ${pattern || "—"}\n` +
-  `- titre : ${title || "—"}\n` +
-  `- session : ${sessionID || "—"}\n` +
-  `- permissionId : ${id || "—"}\n`;
-
-let shouldEmail = true;
-
 try {
   const task = await findTaskBySessionChain(sessionID);
   if (task) {
-    // Dédoublonnage : une même permission → une seule décision + un seul email.
+    // Dédoublonnage : une même permission → une seule décision.
     const existing = id ? await findDecisionByPermissionId(id) : null;
     if (existing) {
-      body += `- déjà enregistrée (décision ${existing.decisionId}, statut ${existing.status})`;
-      shouldEmail = false;
+      console.log(`déjà enregistrée (décision ${existing.decisionId}, statut ${existing.status}) — pas de nouvelle décision`);
     } else {
       const d = await requestDecision({
         taskId: task.id,
@@ -54,22 +44,11 @@ try {
         requestedBy: "permission-hook",
         sessionId: sessionID || undefined,
       });
-      body += `- tâche : ${task.id}\n- décision : ${d.decisionId} (statut ${d.status})`;
+      console.log(`décision enregistrée : ${d.decisionId} (statut ${d.status})`);
     }
   } else {
-    body += `- (aucune tâche liée à la session ${sessionID || "inconnue"})`;
+    console.log(`(aucune tâche liée à la session ${sessionID || "inconnue"})`);
   }
 } catch (e) {
-  body += `- (enregistrement décision échoué : ${e.message})`;
-}
-
-if (shouldEmail) {
-  try {
-    execFileSync("node", [MAIL, "--subject", "[NOTIFY] Permission requise", "--body", body], { stdio: "pipe" });
-    console.log("email envoyé");
-  } catch (e) {
-    console.error("email échoué :", e.message);
-  }
-} else {
-  console.log("dédupliqué — pas de nouvel email");
+  console.error(`enregistrement décision échoué : ${e.message}`);
 }

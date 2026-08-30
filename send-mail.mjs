@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
  * send-mail.mjs — Envoie un email de notification via SMTP.
+ * UNIQUE primitives SMTP de l'écosystème : appelé uniquement par le daemon
+ * `opencode-notifier` (v0.1.0). Les agents/MCP n'envoient plus d'email.
  *
  * Utilisation :
  *   node send-mail.mjs --subject "Objet" --body "Corps du message"
