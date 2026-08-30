@@ -2,6 +2,8 @@
 /**
  * resolve-permission.mjs — Résout la décision d'une permission opencode
  * (approved/rejected) via son permission_id. Appelé sur `permission.replied`.
+ *
+ * NOTE : `resolveDecisionByPermissionId` est asynchrone (PostgreSQL) → `await`.
  */
 import { resolveDecisionByPermissionId } from "/root/.config/opencode/mcp/task-orchestrator/db.mjs";
 
@@ -14,9 +16,13 @@ const permissionId = arg("permissionId");
 const status = arg("status"); // approved | rejected
 const resolution = arg("resolution");
 
-const d = resolveDecisionByPermissionId(permissionId, status, resolution);
-if (d) {
-  console.log(`décision résolue : ${d.decisionId} → ${d.status}`);
-} else {
-  console.log(`aucune décision trouvée pour permission ${permissionId}`);
+try {
+  const d = await resolveDecisionByPermissionId(permissionId, status, resolution);
+  if (d) {
+    console.log(`décision résolue : ${d.decisionId} → ${d.status}`);
+  } else {
+    console.log(`aucune décision trouvée pour permission ${permissionId}`);
+  }
+} catch (e) {
+  console.error(`erreur résolution : ${e.message}`);
 }

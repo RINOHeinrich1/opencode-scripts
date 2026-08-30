@@ -3,6 +3,10 @@
  * record-permission.mjs — Enregistre une demande de permission opencode comme
  * décision humaine (dédoublonnée par permission_id) + envoie un email.
  * Appelé par le plugin `permission-hook` sur l'événement `permission.asked`.
+ *
+ * NOTE : les fonctions du registre sont ASYNCHRONES (PostgreSQL) — il faut les
+ * `await`, sinon `existing`/`task` restent des Promises (toujours truthy) et la
+ * décision n'est jamais enregistrée.
  */
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -21,7 +25,6 @@ const pattern = arg("pattern");
 const title = arg("title");
 const id = arg("id"); // permission id opencode (per_...)
 
-const task = findTaskBySessionChain(sessionID);
 const detail = `${type}${pattern ? " : " + pattern : ""}`;
 
 let body = `Demande de permission détectée :\n` +
@@ -33,22 +36,31 @@ let body = `Demande de permission détectée :\n` +
 
 let shouldEmail = true;
 
-if (task) {
-  // Dédoublonnage : une même permission → une seule décision + un seul email.
-  const existing = id ? findDecisionByPermissionId(id) : null;
-  if (existing) {
-    body += `- déjà enregistrée (décision ${existing.decisionId}, statut ${existing.status})`;
-    shouldEmail = false;
-  } else {
-    try {
-      const d = requestDecision({ taskId: task.id, kind: "permission", ttlMinutes: 60, detail, permissionId: id || undefined });
+try {
+  const task = await findTaskBySessionChain(sessionID);
+  if (task) {
+    // Dédoublonnage : une même permission → une seule décision + un seul email.
+    const existing = id ? await findDecisionByPermissionId(id) : null;
+    if (existing) {
+      body += `- déjà enregistrée (décision ${existing.decisionId}, statut ${existing.status})`;
+      shouldEmail = false;
+    } else {
+      const d = await requestDecision({
+        taskId: task.id,
+        kind: "permission",
+        ttlMinutes: 60,
+        detail,
+        permissionId: id || undefined,
+        requestedBy: "permission-hook",
+        sessionId: sessionID || undefined,
+      });
       body += `- tâche : ${task.id}\n- décision : ${d.decisionId} (statut ${d.status})`;
-    } catch (e) {
-      body += `- tâche : ${task.id}\n- (enregistrement décision échoué : ${e.message})`;
     }
+  } else {
+    body += `- (aucune tâche liée à la session ${sessionID || "inconnue"})`;
   }
-} else {
-  body += `- (aucune tâche liée à la session ${sessionID || "inconnue"})`;
+} catch (e) {
+  body += `- (enregistrement décision échoué : ${e.message})`;
 }
 
 if (shouldEmail) {
