@@ -94,9 +94,14 @@ const manifest = {
   taskId: taskId || null,
   attempts,
   executedAt: new Date().toISOString(),
+  // Traçabilité : args Playwright réellement transmis (config dédiée, project
+  // Playwright, filtres de spec…) + vars d'environnement cible utilisées.
+  pwArgs,
+  e2eBaseUrl: process.env.ONIRIA_E2E_BASE_URL || process.env.E2E_BASE_URL || null,
   results,
 };
 const manifestPath = join(runDir, "manifest.json");
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 console.log(`E2E manifest écrit : ${manifestPath}`);
+console.log(`Playwright args : ${pwArgs.length ? pwArgs.join(" ") : "(config par défaut du dépôt)"}`);
 console.log(`Tests : ${results.length} (${results.filter((r) => r.status === "PASSED").length} PASS, ${results.filter((r) => r.status === "FAILED").length} FAIL, ${results.filter((r) => r.status === "SKIPPED").length} SKIPPED)`);
