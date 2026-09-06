@@ -85,7 +85,9 @@ if (parsed && Array.isArray(parsed.suites)) {
 }
 
 if (!results.length) {
-  results.push({ specFile: "—", scenario: "(aucun test exécuté)", title: null, status: failedLaunch ? "ERROR" : "SKIPPED", durationMs: 0, error: raw.slice(0, 400) || "aucun résultat", summary: "aucun test exécuté (erreur de lancement ou filtre vide)" });
+  // PLUS AUCUNE entrée fantôme : un run sans test (filtre vide ou échec de
+  // lancement) est porté par manifest.failedLaunch / manifest.emptyFilter.
+  console.warn("Aucun test exécuté (filtre vide ou erreur de lancement) — reporté au manifest.");
 }
 
 const manifest = {
@@ -98,6 +100,12 @@ const manifest = {
   // Playwright, filtres de spec…) + vars d'environnement cible utilisées.
   pwArgs,
   e2eBaseUrl: process.env.ONIRIA_E2E_BASE_URL || process.env.E2E_BASE_URL || null,
+  // Une erreur de lancement (playwright n'a pas produit de rapport) ou un filtre
+  // qui ne matche AUCUN test N'EST PAS une entrée de test : c'est un signal de
+  // niveau run, porté par launchError (jamais une entrée « (aucun test exécuté) »).
+  failedLaunch,
+  launchError: failedLaunch ? (raw.slice(0, 400) || "échec de lancement playwright") : null,
+  emptyFilter: !failedLaunch && results.length === 0,
   results,
 };
 const manifestPath = join(runDir, "manifest.json");
