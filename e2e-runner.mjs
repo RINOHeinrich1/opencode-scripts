@@ -49,12 +49,74 @@ try { parsed = JSON.parse(raw); } catch { parsed = null; }
 
 const results = [];
 if (parsed && Array.isArray(parsed.suites)) {
+  const statusMap = { passed: "PASSED", failed: "FAILED", timedOut: "FAILED", skipped: "SKIPPED", interrupted: "ERROR" };
+  const statusLabel = { PASSED: "PASSED", FAILED: "FAILED", SKIPPED: "SKIPPED", ERROR: "ERROR" };
+  // Rapport texte d'une exécution : [STARTED]/[STEP]/[INFO]/[PASS]/[FAIL]/[GAP]/[RESULT].
+  const specRel = (f) => (f ? relative(process.cwd(), f).replace(/\\/g, "/") : null) || f || "spec";
+  const attachBody = (res) => {
+    // Playwright (reporter JSON) embarque l'attachment texte du StepReporter
+    // encodé en base64 (champ body) quand il n'a pas de chemin fichier.
+    const att = (res.attachments || []).find((a) => a && a.name === "rapport-e2e-texte" && a.body);
+    if (!att || !att.body) return null;
+    try { return Buffer.from(String(att.body), "base64").toString("utf8"); } catch { return null; }
+  };
+  const skipReasonOf = (test) => {
+    const a = (test.annotations || []).find((x) => x && x.type === "skip");
+    return (a && a.description) ? String(a.description) : null;
+  };
+  const errMsgOf = (res) => {
+    if (res.error && res.error.message) return String(res.error.message);
+    if (Array.isArray(res.errors) && res.errors[0] && res.errors[0].message) return String(res.errors[0].message);
+    return null;
+  };
+  const compactSummary = (reportText, status, skipReason, errMsg) => {
+    if (status === "SKIPPED") return skipReason ? `SKIPPED : ${skipReason}` : "SKIPPED (raison non renseignée par le test)";
+    if (status === "FAILED" || status === "ERROR") return `${status} : ${(errMsg || "échec non détaillé").slice(0, 400)}`;
+    if (reportText) {
+      const lines = reportText.split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const m = /^\[RESULT\]\s*(.*)$/.exec(lines[i]);
+        if (m) return `PASSED : ${m[1]}`;
+      }
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const m = /^\[PASS\]\s*(.*)$/.exec(lines[i]);
+        if (m) return `PASSED : ${m[1].slice(0, 300)}`;
+      }
+    }
+    return "PASSED";
+  };
   const walk = (suite) => {
     for (const spec of suite.specs || []) {
       for (const test of spec.tests || []) {
         for (const res of test.results || []) {
-          const statusMap = { passed: "PASSED", failed: "FAILED", timedOut: "FAILED", skipped: "SKIPPED", interrupted: "ERROR" };
           const status = statusMap[res.status] || (failedLaunch ? "ERROR" : "ERROR");
+          const reportText = attachBody(res);
+          const skipReason = skipReasonOf(test);
+          const errMsg = errMsgOf(res);
+          // Rapport texte riche : en-tête run + transcript des étapes (si
+          // l'attachment a été posé par le spec) + pied de page statut/raison.
+          const reportLines = [];
+          reportLines.push(`[REPORT-TEXTE] ${runId}`);
+          reportLines.push(`[SCENARIO] ${test.title || spec.title || "scénario"}`);
+          reportLines.push(`[SPEC] ${specRel(spec.file)}`);
+          reportLines.push(`[STATUS] ${statusLabel[status] || status}`);
+          if (reportText) reportLines.push(reportText);
+          else reportLines.push("[INFO] Aucun rapport d'étapes (le spec n'a pas posé d'attachment « rapport-e2e-texte » — vérifier le helper StepReporter / le bloc try-finally du test).");
+          if (status === "SKIPPED") {
+            reportLines.push(skipReason ? `[SKIPPED] ${skipReason}` : "[SKIPPED] Le test a été ignoré sans raison explicite (test.skip sans description).");
+          }
+          if ((status === "FAILED" || status === "ERROR") && errMsg) {
+            reportLines.push(`[FAILED] ${errMsg}`);
+          }
+          reportLines.push(`[DURATION] ${res.duration || 0}ms`);
+          const fullReport = reportLines.join("\n");
+          // Écrit le rapport texte (permet l'import d'un vrai transcript IA).
+          let reportFile = null;
+          try {
+            const rf = `report-${runId}-${results.length + 1}.txt`;
+            writeFileSync(join(runDir, rf), fullReport);
+            reportFile = rf;
+          } catch {}
           let videoFile = null;
           let i = 0;
           for (const att of res.attachments || []) {
@@ -64,16 +126,16 @@ if (parsed && Array.isArray(parsed.suites)) {
             }
           }
           const entry = {
-            specFile: relative(process.cwd(), spec.file || "").replace(/\\/g, "/") || spec.file,
+            specFile: specRel(spec.file),
             scenario: test.title || spec.title || "scénario",
             title: test.title || null,
             status,
             durationMs: res.duration || 0,
             videoFile,
-            error: (res.error && res.error.message) ? res.error.message.slice(0, 400) : null,
-            summary: res.status === "passed"
-              ? `PASS ${test.title}`
-              : ((res.error && res.error.message) ? `Échec : ${res.error.message.slice(0, 300)}` : `Statut ${res.status}`),
+            reportFile,
+            error: errMsg ? errMsg.slice(0, 400) : null,
+            skipReason,
+            summary: compactSummary(reportText, status, skipReason, errMsg),
           };
           results.push(entry);
         }
