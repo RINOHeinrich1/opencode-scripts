@@ -1,29 +1,36 @@
 #!/usr/bin/env node
-// e2e-run-ci.mjs — Pont CI/CD ↔ registre E2E (ADR 10, étape post-déploiement).
+// e2e-run-ci.mjs — Pont CI/CD ↔ registre E2E (ADR 10, étape post-déploiement ;
+// modèle E2E ADR 11 : un test = 1 projet/produit + 1..N repos traversés).
 //
-// Résout les tests E2E ACTIVE du registre (e2e_tests) pour les projets couverts
-// cibles (mada-talk front + oniria console), déclenche e2e_run (origin=ci,
-// baseUrl préprod) pour chacun d'eux en séquence STRICTE (Supabase préprod
-// partagée : « un seul run à la fois »), puis émet la preuve JSON : la liste
-// des exécutions importées.
+// Résout les tests E2E ACTIVE du registre (e2e_list status=ACTIVE, filtre
+// project = PROJET/produit) pour les projets cibles (mada-talk front + oniria
+// console), déclenche e2e_run (origin=ci, cible préprod) pour chaque spec en
+// séquence STRICTE (Supabase préprod partagée : « un seul run à la fois »), puis
+// émet la preuve JSON : la liste des exécutions importées.
+//
+// ADR 11 (PENDANT exécution) : project_list n'expose plus e2eRepoDir/e2eBaseUrl
+// au niveau projet ; la réponse d'un test porte project (produit) + repos[]
+// (repos traversés). e2e_run, appelé avec e2eTestId (+ project) SANS repoDir,
+// résout lui-même le repo d'exécution (celui du spec) et la baseUrl. Ce script
+// n'appelle donc PLUS project_list : --repoDir/--baseUrl ne sont que des
+// surcharges optionnelles (appliquées à tous les runs).
 //
 // Usage (depuis un checkout applicatif hôte — compat process.cwd()) :
 //   node e2e-run-ci.mjs [--project <id> | --projects a,b] [--repoDir <dir>]
 //                       [--baseUrl <url>] [--taskId T-...] [--origin ci]
 //                       [--dryRun]
 //
-//   --project / --projects : projets cibles (défaut : mada-talk,oniria).
-//   --repoDir / --baseUrl  : surcharges appliquées à TOUS les projets (sinon
-//                            résolus depuis project_list : e2eRepoDir/e2eBaseUrl).
+//   --project / --projects : projets cibles = PRODUITS (défaut : mada-talk,oniria).
+//   --repoDir / --baseUrl  : surcharges OPTIONNELLES appliquées à TOUS les runs
+//                            (sinon e2e_run résout repoDir/baseUrl du test, ADR 11).
 //   --taskId               : tâche origine associée aux exécutions (tracée).
 //   --origin               : origine du run (défaut : ci).
 //   --dryRun               : résolution seule (tests ACTIVE groupés), aucun run.
 //
 // Codes de sortie :
 //   0 = OK — mécanisme de run réalisé (y compris échecs E2E : NON bloquant).
-//   1 = config/données (projet inconnu, repoDir/baseUrl non résolus, aucun test
-//       ACTIVE, origin invalide).
-//   2 = erreur registre/MCP (project_list / e2e_list / e2e_run échoué).
+//   1 = config/données (origin invalide, projet sans test ACTIVE, aucun test).
+//   2 = erreur registre/MCP (e2e_list / e2e_run échoué).
 //
 // Sortie : JSON proof sur stdout ({ ok, origin, startedAt, finishedAt, projects[],
 // executions[], failures[], summary }) — rien d'autre sur stdout.
@@ -34,7 +41,7 @@ import { resolve } from "node:path";
 import { taskOrchestrator } from "/root/orchestrator-panel/mcp-client.mjs";
 
 // --- Constantes de configuration (A004) -------------------------------------
-const DEFAULT_PROJECTS = ["mada-talk", "oniria"]; // front SPA + console admin
+const DEFAULT_PROJECTS = ["mada-talk", "oniria"]; // produits : front SPA + console admin
 const DEFAULT_ORIGIN = "ci";
 const ACTIVE_STATUS = "ACTIVE";
 const LIST_LIMIT = 500;
@@ -73,26 +80,9 @@ function parseConfig() {
   };
 }
 
-// Résout la méta par projet (checkout hôte + URL préprod) depuis le registre.
-async function resolveProjectMeta(config) {
-  const res = await taskOrchestrator("project_list", {}); // échec → infra (exit 2)
-  const list = (res && Array.isArray(res.projects)) ? res.projects : [];
-  const byId = new Map(list.map((p) => [p.id, p]));
-  const metas = [];
-  for (const id of config.projects) {
-    const p = byId.get(id);
-    if (!p) throw new UsageError(`projet inconnu dans le registre : "${id}" (vérifier project_list)`);
-    const repoDirRaw = config.repoDir || p.e2eRepoDir || "";
-    const repoDir = repoDirRaw ? resolve(repoDirRaw) : "";
-    const baseUrl = config.baseUrl || p.e2eBaseUrl || "";
-    if (!repoDir) throw new UsageError(`repoDir non résolu pour "${id}" (e2eRepoDir registre vide et pas de --repoDir)`);
-    if (!baseUrl) throw new UsageError(`baseUrl non résolue pour "${id}" (e2eBaseUrl registre vide et pas de --baseUrl)`);
-    metas.push({ id, name: p.name || id, repoDir, baseUrl });
-  }
-  return metas;
-}
-
-// Résout les tests ACTIVE du registre pour un projet couvert (dédupliqués).
+// Résout les tests ACTIVE du registre pour un projet/produit couvert (dédupliqués).
+// ADR 11 : le filtre project porte sur le PROJET (produit) ; chaque test expose
+// repos[] (ids des repos traversés) — utilisé pour enrichir la preuve.
 async function resolveActiveTests(projectId) {
   const res = await taskOrchestrator("e2e_list", { status: ACTIVE_STATUS, project: projectId, limit: LIST_LIMIT });
   const tests = (res && Array.isArray(res.tests)) ? res.tests : [];
@@ -122,16 +112,31 @@ function groupBySpec(tests) {
   }));
 }
 
+// Ids des repos traversés (dédupliqués) des tests d'un projet — enrichissement
+// de la preuve (ADR 11). Tolerant : si e2e_list ne porte pas repos[], retourne [].
+function reposTraversedBy(tests) {
+  const ids = new Set();
+  for (const t of tests) {
+    for (const rid of Array.isArray(t.repos) ? t.repos : []) {
+      if (rid) ids.add(String(rid));
+    }
+  }
+  return [...ids].sort();
+}
+
 // Déclenche e2e_run (origin=ci, cible préprod) pour un groupe de spec.
-async function runSpecGroup(meta, group, config) {
+// ADR 11 : payload minimal { project, e2eTestId, origin } (+ taskId) — le serveur
+// résout repoDir/baseUrl depuis le test. repoDir/baseUrl ne sont passés que si
+// l'utilisateur les fournit explicitement (surcharges CLI optionnelles).
+async function runSpecGroup(projectId, group, config) {
   const payload = {
-    project: meta.id,
-    repoDir: meta.repoDir,
-    baseUrl: meta.baseUrl,
-    e2eTestId: group.representative, // résout specPattern = specFile canonique
+    project: projectId,
+    e2eTestId: group.representative, // résout specPattern = specFile canonique + repo d'exécution
     origin: config.origin,
   };
   if (config.taskId) payload.taskId = config.taskId;
+  if (config.repoDir) payload.repoDir = resolve(config.repoDir);
+  if (config.baseUrl) payload.baseUrl = config.baseUrl;
   const res = await taskOrchestrator("e2e_run", payload); // échec MCP → throw → infra
   if (!res || res.ok !== true) {
     const msg = (res && (res.error || res.message)) ? String(res.error || res.message) : "e2e_run a répondu ok=false";
@@ -177,37 +182,29 @@ async function main() {
     console.error(`DONNÉES (${project}) : ${reason}`);
   };
 
-  // --- Résolution des métadonnées projets (project_list) ---------------------
-  let metas;
-  try {
-    metas = await resolveProjectMeta(config);
-  } catch (e) {
-    if (e instanceof UsageError) { console.error(`ERREUR (config) : ${e.message}`); process.exit(1); }
-    recordInfra("(tous)", "project_list", e);
-    out.finishedAt = new Date().toISOString();
-    out.summary = { projects: 0, specGroups: 0, runsTriggered: 0, executions: 0, passed: 0, failed: 0, infraErrors, dataErrors };
-    process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
-    process.exit(2);
-  }
-
   // --- Séquence stricte : un projet puis un spec à la fois (jamais Promise.all)
-  for (const meta of metas) {
-    const proj = { id: meta.id, name: meta.name, repoDir: meta.repoDir, baseUrl: meta.baseUrl, testsCount: 0, specGroups: [] };
+  // Pas de project_list : la sélection = e2e_list(status=ACTIVE, project) par
+  // PROJET/produit ; repoDir/baseUrl résolus par e2e_run (ADR 11).
+  for (const id of config.projects) {
+    const proj = { id, name: id, testsCount: 0, specGroups: [], reposTraversed: [] };
+    if (config.repoDir) proj.repoDir = resolve(config.repoDir);
+    if (config.baseUrl) proj.baseUrl = config.baseUrl;
     out.projects.push(proj);
 
     // Résolution des tests ACTIVE (e2e_list) — échec = infra, on continue.
     let tests;
     try {
-      tests = await resolveActiveTests(meta.id);
+      tests = await resolveActiveTests(id);
     } catch (e) {
-      recordInfra(meta.id, "e2e_list", e);
+      recordInfra(id, "e2e_list", e);
       continue;
     }
     if (!tests.length) {
-      recordData(meta.id, "aucun test E2E ACTIVE dans le registre — run impossible");
+      recordData(id, "aucun test E2E ACTIVE dans le registre pour ce projet (produit) — run impossible");
       continue;
     }
     proj.testsCount = tests.length;
+    proj.reposTraversed = reposTraversedBy(tests);
     const groups = groupBySpec(tests);
     proj.specGroups = groups;
 
@@ -216,15 +213,15 @@ async function main() {
     for (const group of groups) {
       let run;
       try {
-        run = await runSpecGroup(meta, group, config); // e2e_run (origin=ci)
+        run = await runSpecGroup(id, group, config); // e2e_run (origin=ci)
       } catch (e) {
-        recordInfra(meta.id, `e2e_run ${group.specFile}`, e);
+        recordInfra(id, `e2e_run ${group.specFile}`, e);
         continue;
       }
       runsTriggered++;
       for (const r of run.results) {
         const exec = {
-          project: meta.id,
+          project: id,
           runId: run.runId,
           specFile: group.specFile,
           e2eTestId: r.e2eTestId,
