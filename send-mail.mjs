@@ -7,6 +7,10 @@
  * Utilisation :
  *   node send-mail.mjs --subject "Objet" --body "Corps du message"
  *   node send-mail.mjs --subject "..." --body "..." --attachment "/chemin/rapport.md"
+ *   node send-mail.mjs --subject "..." --body "..." --to "a@x.fr,b@y.fr"
+ *
+ * `--to` (optionnel) force les destinataires (notifications PAR UTILISATEUR) ;
+ * sans `--to`, on retombe sur NOTIFY_RECIPIENTS (destinataires globaux).
  *
  * Les informations SMTP sont lues depuis un fichier .env (ou l'environnement).
  * Variables attendues (mêmes que le plugin de notification) :
@@ -31,9 +35,10 @@ function argValue(name) {
 const subject = argValue("--subject")
 const body = argValue("--body")
 const attachment = argValue("--attachment")
+const toArg = argValue("--to")
 
 if (!subject || !body) {
-  console.error("Usage: node send-mail.mjs --subject <objet> --body <corps> [--attachment <chemin>]")
+  console.error("Usage: node send-mail.mjs --subject <objet> --body <corps> [--attachment <chemin>] [--to <a@x.fr,b@y.fr>]")
   process.exit(1)
 }
 
@@ -72,7 +77,8 @@ const SMTP = {
   pass: env("NOTIFY_SMTP_PASS", ""),
   from: env("NOTIFY_SMTP_FROM", "contact@man-dam.net"),
 }
-const RECIPIENTS = env("NOTIFY_RECIPIENTS", "it.specialist.gasca@gmail.com")
+// Destinataires : `--to` (par utilisateur) prioritaire, sinon la liste globale.
+const RECIPIENTS = (toArg && toArg.trim() ? toArg : env("NOTIFY_RECIPIENTS", "it.specialist.gasca@gmail.com"))
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean)
