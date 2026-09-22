@@ -115,7 +115,7 @@ try {
           regles: migrated.regles,
           pieces: migrated.pieces,
           tasks: migrated.tasks,
-          recettes: migrated.recettes,
+          cadrages: migrated.cadrages,
         };
         row.ok = true;
       }
