@@ -14,7 +14,7 @@
 
 import { execFileSync } from "node:child_process";
 import { writeFileSync, mkdirSync, rmSync, existsSync, copyFileSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 const OPENCODE_BIN = "/root/.opencode/bin/opencode";
 const USERS_DIR = "/root/.config/opencode/users";
@@ -69,17 +69,35 @@ const dataDir = join(USERS_DIR, user, "data");
 mkdirSync(dataDir, { recursive: true });
 
 // Identifiants fournisseurs LLM (auth.json) : le data dir étant isolé, l'auth
-// n'est PAS dans la config partagée → on la copie depuis l'instance de référence
-// (sinon l'instance dédiée ne peut exécuter aucun modèle).
+// n'est PAS dans la config partagée. On la GÉNÈRE depuis la clé ACTIVE de chaque
+// fournisseur (table `provider_keys` du panneau, chiffrée AES-256-GCM) ; repli
+// sur la copie de l'instance de référence si le module/la base est indisponible
+// (le provisioning n'est JAMAIS bloqué par l'auth).
 const SHARED_AUTH = process.env.OPENCODE_SHARED_AUTH || "/root/.local/share/opencode/auth.json";
+const PROVIDER_AUTH_MODULE = process.env.OPENCODE_PROVIDER_AUTH || "/root/orchestrator-panel/provider-auth.mjs";
+const ocDir = join(dataDir, "opencode");
+mkdirSync(ocDir, { recursive: true });
+const authDest = join(ocDir, "auth.json");
+let authMode = "copie (repli)";
 try {
-  if (existsSync(SHARED_AUTH)) {
-    const ocDir = join(dataDir, "opencode");
-    mkdirSync(ocDir, { recursive: true });
-    copyFileSync(SHARED_AUTH, join(ocDir, "auth.json"));
-    chmodSync(join(ocDir, "auth.json"), 0o600);
-  }
-} catch (e) { console.error("auth copy:", (e && e.message) || String(e)); }
+  // Écriture CIBLÉE de l'auth.json de la SEULE nouvelle instance (les autres
+  // instances sont maintenues par `opencode-auth-sync.mjs`).
+  const mod = await import(PROVIDER_AUTH_MODULE);
+  const db = await import(join(dirname(PROVIDER_AUTH_MODULE), "panel-db.mjs"));
+  const active = await db.getActiveProviderKeys();
+  if (!active.length) throw new Error("aucune clé active");
+  mod.writeAuthJson(authDest, mod.renderAuthJson(active));
+  chmodSync(authDest, 0o600);
+  authMode = `généré (${active.length} fournisseur(s))`;
+} catch (e) {
+  console.error("auth génération indisponible, repli copie:", (e && e.message) || String(e));
+  try {
+    if (existsSync(SHARED_AUTH)) {
+      copyFileSync(SHARED_AUTH, authDest);
+      chmodSync(authDest, 0o600);
+    }
+  } catch (e2) { console.error("auth copy:", (e2 && e2.message) || String(e2)); }
+}
 
 const env = [
   `OPENCODE_PORT=${port}`,
@@ -139,4 +157,4 @@ try { execFileSync("ln", ["-sf", `/etc/nginx/sites-available/oc-${user}.conf`, `
 try { execFileSync("nginx", ["-t"], { stdio: "pipe" }); execFileSync("systemctl", ["reload", "nginx"]); }
 catch (e) { console.error("nginx reload:", String((e && e.stderr) || (e && e.message) || e).slice(0, 300)); }
 
-console.log(JSON.stringify({ ok: true, user, port, service: `opencode@${user}.service`, dataDir, url: `https://${HOST}`, certOk }));
+console.log(JSON.stringify({ ok: true, user, port, service: `opencode@${user}.service`, dataDir, url: `https://${HOST}`, certOk, auth: authMode }));
