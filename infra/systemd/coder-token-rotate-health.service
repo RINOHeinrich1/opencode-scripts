@@ -1,0 +1,11 @@
+[Unit]
+Description=Supervision du token Coder (mode --health, lecture seule)
+Documentation=file:///root/.config/opencode/scripts/docs/runbook-rotation-token-coder.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node /root/.config/opencode/scripts/coder-token-rotate.mjs --health
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,12 @@
+[Unit]
+Description=Vérifie l'état de la rotation du token Coder (toutes les 1 h)
+Documentation=file:///root/.config/opencode/scripts/docs/runbook-rotation-token-coder.md
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

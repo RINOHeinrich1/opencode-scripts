@@ -1,0 +1,12 @@
+[Unit]
+Description=Planifie la rotation du token Coder (toutes les 6 h, rattrapage au boot)
+Documentation=file:///root/.config/opencode/scripts/docs/runbook-rotation-token-coder.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
