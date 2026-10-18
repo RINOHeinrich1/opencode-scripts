@@ -7,5 +7,9 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/node /root/.config/opencode/scripts/coder-token-rotate.mjs --health
+# --health : 0 = OK, 2 = « expire bientôt » (avertissement NORMAL, la rotation
+# planifiée s'en charge) → succès pour systemd. 3 (token expiré/introuvable) et
+# 4 (heartbeat périmé) restent des ÉCHECS visibles (systemctl --failed).
+SuccessExitStatus=0 2
 StandardOutput=journal
 StandardError=journal

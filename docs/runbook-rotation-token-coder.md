@@ -92,6 +92,12 @@ node coder-token-rotate.mjs --health
 **Seuils par défaut** : `MIN_REMAINING_HOURS=48` h, `STALE_HOURS=13` h
 (surchargeables par argument ou variable d'environnement `CODER_ROTATE_*`).
 
+> **Intégration systemd** : `coder-token-rotate-health.service` déclare
+> `SuccessExitStatus=0 2` — le code `2` (« expire bientôt ») est un avertissement
+> **normal** (la rotation planifiée le résorbe sous 6 h) et ne doit pas marquer
+> l'unité `failed` (bruit). Les codes `3`/`4` restent des **échecs** visibles
+> (`systemctl --failed`).
+
 ## 5. Bootstrap / auto-guérison (token déjà expiré)
 
 `bootstrapToken()` cherche, **dans l'ordre** :
