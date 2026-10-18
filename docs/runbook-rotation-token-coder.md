@@ -51,7 +51,7 @@ Chaque exécution écrit `/var/lib/coder-token-rotate/state.json` (mode `0600`,
   "lastSuccessAt": "2026-09-23T15:09:42.074Z",
   "status": "rotated | valid | token_expired | token_missing | no_config | failed",
   "org": "onirtech",
-  "tokenName": "oniria-panel",
+  "tokenName": "oniria-panel-mve176ir",
   "remainingHours": null,
   "expiresAt": null,
   "lastAlertDate": "2026-09-23",
@@ -63,6 +63,10 @@ Chaque exécution écrit `/var/lib/coder-token-rotate/state.json` (mode `0600`,
   skip légitime (« token encore valide ») : c'est le battement de cœur du
   planificateur.
 - `lastAlertDate` implémente le **throttling email à 1 alerte par jour**.
+- `tokenName` est le nom **courant** du token. Coder impose des noms **uniques** :
+  chaque rotation crée `<name>-<horodatage>` (ex. `oniria-panel-mve176ir`) puis
+  révoque l'ancien token (authentifié avec le nouveau). Le suivi lit donc le nom
+  courant depuis `state.json` (repli sur le nom de base).
 
 ## 4. Contrat CLI et codes de sortie
 
@@ -134,6 +138,7 @@ node /root/.config/opencode/scripts/coder-token-rotate.mjs --bootstrap
 | `--health` → `4` | heartbeat périmé | `systemctl list-timers coder-token-rotate.timer` ; vérifier le timer/daemon ; lancer `systemctl start coder-token-rotate.service` |
 | `--health` → `2` | rotation à venir | s'assurer que le timer tourne ; `--force` si besoin |
 | rotation `1` | `coder tokens create` refusé | `journalctl -u coder-token-rotate.service` ; vérifier `CODER_URL`/token |
+| rotation `1` — « token already exists » | nom de token réutilisé (régression : le nom doit être **unique** par rotation) | vérifier que le script crée `<name>-<horodatage>` puis révoque l'ancien (`state.tokenName`) |
 | rotation `0` mais token toujours invalide | mauvais `--name`/`--org` | `coder tokens ls --include-expired` |
 
 ## 7. Rappels

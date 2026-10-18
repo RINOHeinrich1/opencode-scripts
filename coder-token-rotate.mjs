@@ -9,6 +9,8 @@
 // Fiabilité (voir docs/runbook-rotation-token-coder.md) :
 //   - heartbeat      : /var/lib/coder-token-rotate/state.json écrit à CHAQUE exécution ;
 //   - observation    : un token absent/expiré déclenche la rotation (jamais de skip silencieux) ;
+//   - rotation       : nom UNIQUE par cycle (`<name>-<horodatage>`, Coder exige des noms
+//                      uniques) puis révocation de l'ancien token avec le nouveau ;
 //   - échec bruyant  : alerte email (send-mail.mjs, throttlée 1×/jour) + code de sortie non nul ;
 //   - auto-guérison  : bootstrapToken() via CODER_BOOTSTRAP_TOKEN ou la session CLI ~/.config/coderv2 ;
 //   - supervision    : mode --health (LECTURE SEULE) avec codes 0/2/3/4.
@@ -121,17 +123,23 @@ function coder(args, token = cfg.token) {
 // ─── A004/A005 — expiration du token courant (token EXPIRÉ inclus) ──────────
 // `--include-expired` est indispensable : sinon un token expiré disparaît de la
 // liste et l'ancien code concluait à tort `remainingHours = Infinity` (skip).
+// Le token est créé sous un nom UNIQUE par rotation (`<name>-<horodatage>`) pour
+// satisfaire l'unicité des noms imposée par Coder (sinon « token already exists »
+// à chaque rotation) : le nom COURANT est donc lu depuis le heartbeat, avec repli
+// sur le nom de base (première exécution / heartbeat indisponible).
+const trackedName = readState().tokenName || name;
 let remainingHours = null;
 let expiresAt = null;
 let tokenFound = false;
 let authRefused = false;
+let tokenList = [];
 
 if (cfg.token) {
   try {
     const raw = coder(["tokens", "ls", "--include-expired", "--output", "json"]);
     const list = JSON.parse(raw);
-    const arr = Array.isArray(list) ? list : (list.tokens || []);
-    const mine = arr.find((t) => (t.token_name || t.name || t.Name) === name);
+    tokenList = Array.isArray(list) ? list : (list.tokens || []);
+    const mine = tokenList.find((t) => (t.token_name || t.name || t.Name) === trackedName);
     if (mine) {
       tokenFound = true;
       const exp = mine.expires_at || mine.expiresAt || mine.ExpiresAt;
@@ -140,7 +148,7 @@ if (cfg.token) {
         remainingHours = (new Date(exp).getTime() - Date.now()) / 3600000;
       }
     } else {
-      log(`token ${name} absent de 'coder tokens ls --include-expired' — rotation forcée (token_missing).`);
+      log(`token ${trackedName} absent de 'coder tokens ls --include-expired' — rotation forcée (token_missing).`);
     }
   } catch (e) {
     // Authentification refusée / session expirée : le token stocké n'est plus utilisable.
@@ -154,20 +162,20 @@ if (healthOnly) {
   const st = readState();
   const now = Date.now();
   let code = 0;
-  let reason = `token ${name} valide${remainingHours !== null ? ` (~${Math.round(remainingHours)} h)` : ""}, heartbeat à jour`;
+  let reason = `token ${trackedName} valide${remainingHours !== null ? ` (~${Math.round(remainingHours)} h)` : ""}, heartbeat à jour`;
 
   if (!cfg.token || authRefused || !tokenFound || (remainingHours !== null && remainingHours <= 0)) {
     code = 3;
     reason = !cfg.token
       ? `aucun token ${name} stocké pour l'organisation ${org} — bootstrap requis`
       : authRefused
-        ? `authentification Coder refusée — token ${name} expiré/invalide — bootstrap requis`
+        ? `authentification Coder refusée — token ${trackedName} expiré/invalide — bootstrap requis`
         : !tokenFound
-          ? `token ${name} introuvable dans 'coder tokens ls --include-expired' — rotation/bootstrapping requis`
-          : `token ${name} EXPIRÉ${expiresAt ? ` (expires ${expiresAt})` : ""} — bootstrap requis`;
+          ? `token ${trackedName} introuvable dans 'coder tokens ls --include-expired' — rotation/bootstrapping requis`
+          : `token ${trackedName} EXPIRÉ${expiresAt ? ` (expires ${expiresAt})` : ""} — bootstrap requis`;
   } else if (remainingHours !== null && remainingHours < MIN_REMAINING_HOURS) {
     code = 2;
-    reason = `token ${name} expire bientôt (~${Math.round(remainingHours)} h < ${MIN_REMAINING_HOURS} h)`;
+    reason = `token ${trackedName} expire bientôt (~${Math.round(remainingHours)} h < ${MIN_REMAINING_HOURS} h)`;
   } else {
     const last = st.lastSuccessAt ? Date.parse(st.lastSuccessAt) : NaN;
     if (!last || Number.isNaN(last) || (now - last) > STALE_HOURS * 3600000) {
@@ -228,9 +236,9 @@ const needRotation = force || bootstrap || !tokenFound || remainingHours === nul
 if (!needRotation) {
   writeState({
     lastRunAt: nowIso(), lastSuccessAt: nowIso(), status: "valid",
-    org, tokenName: name, remainingHours: Math.round(remainingHours), expiresAt, exitCode: 0,
+    org, tokenName: trackedName, remainingHours: Math.round(remainingHours), expiresAt, exitCode: 0,
   });
-  log(`token ${name} encore valide ~${Math.round(remainingHours)} h (> ${MIN_REMAINING_HOURS} h) — pas de rotation.`);
+  log(`token ${trackedName} encore valide ~${Math.round(remainingHours)} h (> ${MIN_REMAINING_HOURS} h) — pas de rotation.`);
   process.exit(0);
 }
 
@@ -257,7 +265,7 @@ if (!credential) {
     `Action requise : bootstrap admin Coder (coder login ${cfg.url}) — voir docs/runbook-rotation-token-coder.md.`;
   notify(`[ALERT] Rotation token Coder IMPOSSIBLE — ${status} (org ${org})`, detail);
   writeState({
-    lastRunAt: nowIso(), status, org, tokenName: name,
+    lastRunAt: nowIso(), status, org, tokenName: trackedName,
     remainingHours: remainingHours === null ? null : Math.round(remainingHours), expiresAt, exitCode: 3,
   });
   log(`échec : ${status} — aucun credential utilisable.`);
@@ -265,15 +273,33 @@ if (!credential) {
 }
 
 // ─── A007/A008 — création + persistance ; échec BRUYANT (A008) ──────────────
+// Nom UNIQUE par rotation : Coder refuse un nom de token déjà utilisé. On crée
+// donc `<name>-<horodatage>` puis on révoque l'ancien token — ce qui sert aussi
+// de preuve de rotation (le nom change à chaque cycle).
+const rotatedName = `${name}-${Date.now().toString(36)}`;
 try {
-  const newToken = coder(["tokens", "create", "--name", name, "--lifetime", lifetime], credential).trim();
+  const newToken = coder(["tokens", "create", "--name", rotatedName, "--lifetime", lifetime], credential).trim();
   if (!newToken) throw new Error("token vide renvoyé");
   await registerOrganization({ id: org, name: org, coderToken: newToken });
+  // A010 — révocation de l'ancien token : BEST-EFFORT, authentifiée avec le
+  // NOUVEAU token (Coder interdit de révoquer le token qui authentifie l'appel).
+  // Un échec de nettoyage ne compromet PAS la rotation (déjà persistée).
+  for (const t of tokenList) {
+    const n = t.token_name || t.name || t.Name;
+    if (n === name || (n && n.startsWith(`${name}-`))) {
+      try {
+        coder(["tokens", "remove", t.id || t.ID || n], newToken);
+        log(`ancien token ${n} révoqué.`);
+      } catch (e2) {
+        log(`WARN : révocation de l'ancien token ${n} impossible (${String(e2.stderr || e2.message).slice(0, 120)}) — ignoré.`);
+      }
+    }
+  }
   writeState({
     lastRunAt: nowIso(), lastSuccessAt: nowIso(), status: "rotated",
-    org, tokenName: name, remainingHours: null, expiresAt: null, exitCode: 0,
+    org, tokenName: rotatedName, remainingHours: null, expiresAt: null, exitCode: 0,
   });
-  log(`token ${name} renouvelé (lifetime ${lifetime}, credential=${credentialSource}) et secret d'organisation mis à jour.`);
+  log(`token ${rotatedName} renouvelé (lifetime ${lifetime}, credential=${credentialSource}) et secret d'organisation mis à jour.`);
   process.exit(0);
 } catch (e) {
   const detail = String(e.stderr || e.message || e).slice(0, 300);
@@ -282,7 +308,7 @@ try {
     `Échec de la rotation du token ${name} (org ${org}, credential=${credentialSource}) :\n\n${detail}\n\n` +
     `Voir docs/runbook-rotation-token-coder.md.`,
   );
-  writeState({ lastRunAt: nowIso(), status: "failed", org, tokenName: name, exitCode: 1 });
+  writeState({ lastRunAt: nowIso(), status: "failed", org, tokenName: trackedName, exitCode: 1 });
   log(`échec de la rotation : ${detail}`);
   process.exit(1);
 }
